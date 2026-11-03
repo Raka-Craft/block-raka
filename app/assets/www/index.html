@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Block Raka</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; overscroll-behavior: none;
+    background: #10142a;
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
+  #game { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+/* ============================================================
+   BLOCK RAKA — puzzle blok ala Block Blast
+   ============================================================ */
+const BOARD = 8;
+
+// ---------- bentuk balok (cells = [baris, kolom], ternormalisasi) ----------
+const SHAPES = [
+  { cells: [[0,0]], w: 3 },
+  { cells: [[0,0],[0,1]], w: 3 },
+  { cells: [[0,0],[1,0]], w: 3 },
+  { cells: [[0,0],[0,1],[0,2]], w: 3 },
+  { cells: [[0,0],[1,0],[2,0]], w: 3 },
+  { cells: [[0,0],[0,1],[0,2],[0,3]], w: 2 },
+  { cells: [[0,0],[1,0],[2,0],[3,0]], w: 2 },
+  { cells: [[0,0],[0,1],[0,2],[0,3],[0,4]], w: 1 },
+  { cells: [[0,0],[1,0],[2,0],[3,0],[4,0]], w: 1 },
+  { cells: [[0,0],[0,1],[1,0],[1,1]], w: 2 },
+  { cells: [[0,0],[0,1],[0,2],[1,0],[1,1],[1,2]], w: 2 },       // 2x3
+  { cells: [[0,0],[0,1],[1,0],[1,1],[2,0],[2,1]], w: 2 },       // 3x2
+  { cells: [[0,0],[0,1],[0,2],[1,0],[1,1],[1,2],[2,0],[2,1],[2,2]], w: 1 }, // 3x3
+  { cells: [[0,0],[1,0],[2,0],[2,1]], w: 2 },                   // L
+  { cells: [[0,0],[0,1],[0,2],[1,0]], w: 2 },                   // L rot
+  { cells: [[0,0],[0,1],[1,1],[2,1]], w: 2 },
+  { cells: [[0,2],[1,0],[1,1],[1,2]], w: 2 },
+  { cells: [[0,0],[0,1],[1,0]], w: 3 },                         // sudut kecil
+  { cells: [[0,0],[0,1],[1,1]], w: 3 },
+  { cells: [[0,1],[1,0],[1,1]], w: 3 },
+  { cells: [[0,0],[1,0],[1,1]], w: 3 },
+  { cells: [[0,0],[0,1],[0,2],[1,1]], w: 2 },                  // T
+  { cells: [[0,1],[1,0],[1,1],[1,2]], w: 2 },                  // T rot
+  { cells: [[0,0],[1,0],[1,1],[2,0]], w: 2 },                  // T rot
+  { cells: [[0,1],[1,0],[1,1],[2,1]], w: 2 },                  // T rot
+  { cells: [[0,1],[0,2],[1,0],[1,1]], w: 2 },                  // S
+  { cells: [[0,0],[0,1],[1,1],[1,2]], w: 2 },                  // Z
+  { cells: [[0,0],[1,0],[1,1],[2,1]], w: 1 },
+  { cells: [[0,1],[1,0],[1,1],[2,0]], w: 1 },
+];
+
+const PALETTE = [
+  '#ff5b5b', // merah
+  '#ff9f43', // oranye
+  '#ffd32a', // kuning
+  '#7bed6c', // hijau
+  '#4fc3f7', // biru muda
+  '#5b8cff', // biru
+  '#b388ff', // ungu
+  '#ff6fd8', // pink
+  '#4fe0c8', // tosca
+];
+
+// ---------- state ----------
+let board;            // 8x8: null | {color}
+let tray;             // [piece|null, piece|null, piece|null]
+let score = 0, best = 0;
+let gameOver = false;
+let particles = [];   // {x,y,vx,vy,life,color,size}
+let floaters = [];     // {x,y,text,life,color,size}
+let clearing = [];     // {cells:[[r,c,color]], t0}
+let placedPop = [];    // {cells:[[r,c,color]], t0}
+let drag = null;       // {piece, trayIndex, x, y, valid, anchorR, anchorC}
+let restartBtn = null; // {x,y,w,h}
+let againBtn = null;   // tombol main lagi (overlay game over)
+
+try { best = parseInt(localStorage.getItem('blockRakaBest') || '0', 10) || 0; } catch(e) { best = 0; }
+
+function newBoard() {
+  const b = [];
+  for (let r = 0; r < BOARD; r++) { b.push(new Array(BOARD).fill(null)); }
+  return b;
+}
+
+function pickShape() {
+  let total = 0;
+  for (const s of SHAPES) total += s.w;
+  let roll = Math.random() * total;
+  for (const s of SHAPES) { roll -= s.w; if (roll <= 0) return s; }
+  return SHAPES[0];
+}
+
+function randomPiece() {
+  const s = pickShape();
+  const color = PALETTE[(Math.random() * PALETTE.length) | 0];
+  let maxR = 0, maxC = 0;
+  for (const [r, c] of s.cells) { if (r > maxR) maxR = r; if (c > maxC) maxC = c; }
+  return { cells: s.cells, rows: maxR + 1, cols: maxC + 1, color };
+}
+
+function refillTray() {
+  tray = [randomPiece(), randomPiece(), randomPiece()];
+}
+
+function resetGame() {
+  board = newBoard();
+  score = 0;
+  gameOver = false;
+  particles = []; floaters = []; clearing = []; placedPop = []; drag = null;
+  refillTray();
+}
+
+// ---------- audio (WebAudio sederhana) ----------
+let actx = null;
+function ensureAudio() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { actx = null; }
+  }
+  if (actx && actx.state === 'suspended') actx.resume();
+}
+function tone(freq, dur, type, vol, when) {
+  if (!actx) return;
+  try {
+    const t = actx.currentTime + (when || 0);
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol || 0.15, t + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t); o.stop(t + dur + 0.05);
+  } catch(e) {}
+}
+const sfx = {
+  place()  { tone(320, 0.12, 'triangle', 0.18); tone(480, 0.1, 'triangle', 0.12, 0.03); },
+  clear(n) { for (let i = 0; i < 3; i++) tone(440 + i * 160 + n * 40, 0.14, 'sine', 0.16, i * 0.06); },
+  combo(n) { for (let i = 0; i < 4; i++) tone(520 + i * 200 + n * 60, 0.16, 'square', 0.07, i * 0.05); },
+  bad()    { tone(180, 0.15, 'sawtooth', 0.08); },
+  over()   { tone(330, 0.2, 'sine', 0.15); tone(262, 0.2, 'sine', 0.15, 0.18); tone(196, 0.35, 'sine', 0.15, 0.36); },
+  click()  { tone(600, 0.06, 'sine', 0.1); },
+};
+
+// ---------- layout ----------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let DPR = 1, W = 0, H = 0;
+let L = {}; // layout terhitung
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  computeLayout();
+}
+
+function computeLayout() {
+  const pad = 16;
+  const headerH = 96;
+  const boardSize = Math.min(W - pad * 2, 460, H * 0.52);
+  const cell = boardSize / BOARD;
+  const boardX = (W - boardSize) / 2;
+  const boardY = headerH + Math.max(0, (H - headerH - boardSize - 190) * 0.35);
+  const trayH = 128;
+  const trayY = Math.min(H - trayH - 28, boardY + boardSize + 26);
+  const slotW = (W - pad * 2 - 24) / 3;
+  L = {
+    pad, headerH, boardSize, cell, boardX, boardY,
+    trayH, trayY, slotW,
+    slots: [0, 1, 2].map(i => ({
+      x: pad + i * (slotW + 12), y: trayY, w: slotW, h: trayH,
+      cx: pad + i * (slotW + 12) + slotW / 2, cy: trayY + trayH / 2,
+    })),
+  };
+  restartBtn = { x: W - pad - 92, y: 26, w: 92, h: 40 };
+}
+
+function boardXY(r, c) {
+  return { x: L.boardX + c * L.cell, y: L.boardY + r * L.cell };
+}
+function cellAt(x, y) {
+  const c = Math.floor((x - L.boardX) / L.cell);
+  const r = Math.floor((y - L.boardY) / L.cell);
+  if (r < 0 || r >= BOARD || c < 0 || c >= BOARD) return null;
+  return { r, c };
+}
+
+// ---------- aturan main ----------
+function canPlace(piece, r, c) {
+  for (const [dr, dc] of piece.cells) {
+    const rr = r + dr, cc = c + dc;
+    if (rr < 0 || rr >= BOARD || cc < 0 || cc >= BOARD) return false;
+    if (board[rr][cc]) return false;
+  }
+  return true;
+}
+
+function pieceFits(piece) {
+  for (let r = 0; r <= BOARD - piece.rows; r++)
+    for (let c = 0; c <= BOARD - piece.cols; c++)
+      if (canPlace(piece, r, c)) return true;
+  return false;
+}
+
+function checkGameOver() {
+  for (const p of tray) {
+    if (p && pieceFits(p)) return false;
+  }
+  return true;
+}
+
+function addScore(n, x, y, color, size) {
+  score += n;
+  if (x !== undefined) floaters.push({ x, y, text: '+' + n, life: 1, color: color || '#ffd32a', size: size || 20 });
+}
+
+function clearLines() {
+  const fullRows = [], fullCols = [];
+  for (let r = 0; r < BOARD; r++) {
+    let full = true;
+    for (let c = 0; c < BOARD; c++) if (!board[r][c]) { full = false; break; }
+    if (full) fullRows.push(r);
+  }
+  for (let c = 0; c < BOARD; c++) {
+    let full = true;
+    for (let r = 0; r < BOARD; r++) if (!board[r][c]) { full = false; break; }
+    if (full) fullCols.push(c);
+  }
+  const n = fullRows.length + fullCols.length;
+  if (n === 0) return 0;
+  const cells = [];
+  const seen = {};
+  const push = (r, c) => {
+    const k = r + ',' + c;
+    if (!seen[k] && board[r][c]) { seen[k] = 1; cells.push([r, c, board[r][c].color]); }
+  };
+  for (const r of fullRows) for (let c = 0; c < BOARD; c++) push(r, c);
+  for (const c of fullCols) for (let r = 0; r < BOARD; r++) push(r, c);
+  clearing.push({ cells, t0: performance.now() });
+  // partikel ledakan di tiap sel
+  for (const [r, c, color] of cells) {
+    const p = boardXY(r, c);
+    const cx = p.x + L.cell / 2, cy = p.y + L.cell / 2;
+    for (let i = 0; i < 5; i++) {
+      particles.push({
+        x: cx, y: cy,
+        vx: (Math.random() - 0.5) * 320, vy: (Math.random() - 0.5) * 320 - 60,
+        life: 1, color, size: 3 + Math.random() * 5,
+      });
+    }
+  }
+  const cx = L.boardX + L.boardSize / 2, cy = L.boardY + L.boardSize / 2;
+  const pts = cells.length * 10;
+  addScore(pts, cx, cy - 30, '#7bed6c', 22);
+  if (n >= 2) {
+    const bonus = n * 50;
+    floaters.push({ x: cx, y: cy - 70, text: 'Kombo x' + n + '!', life: 1.4, color: '#ff6fd8', size: 30 });
+    score += bonus;
+    floaters.push({ x: cx, y: cy - 34, text: '+' + bonus + ' bonus', life: 1.2, color: '#ff6fd8', size: 18 });
+    sfx.combo(n);
+  } else {
+    sfx.clear(n);
+  }
+  return n;
+}
+
+function placePiece(piece, r, c) {
+  const cells = [];
+  for (const [dr, dc] of piece.cells) {
+    const rr = r + dr, cc = c + dc;
+    board[rr][cc] = { color: piece.color };
+    cells.push([rr, cc, piece.color]);
+  }
+  placedPop.push({ cells, t0: performance.now() });
+  const p = boardXY(r, c);
+  addScore(piece.cells.length * 10, p.x + (piece.cols * L.cell) / 2, p.y, '#ffffff', 18);
+  sfx.place();
+  clearLines();
+}
+
+// ---------- util warna ----------
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) + amt, g = ((n >> 8) & 255) + amt, b = (n & 255) + amt;
+  r = Math.max(0, Math.min(255, r)); g = Math.max(0, Math.min(255, g)); b = Math.max(0, Math.min(255, b));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// gambar satu sel balok bergaya 3D
+function drawBlock(x, y, size, color, alpha, scale) {
+  alpha = alpha === undefined ? 1 : alpha;
+  scale = scale === undefined ? 1 : scale;
+  const pad = Math.max(1.5, size * 0.06);
+  const cx = x + size / 2, cy = y + size / 2;
+  const s = size * scale;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(cx, cy);
+  // bayangan
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  roundRect(-s / 2 + pad, -s / 2 + pad + 2, s - pad * 2, s - pad * 2, s * 0.22);
+  ctx.fill();
+  // badan dengan gradien
+  const g = ctx.createLinearGradient(0, -s / 2, 0, s / 2);
+  g.addColorStop(0, shade(color, 45));
+  g.addColorStop(0.55, color);
+  g.addColorStop(1, shade(color, -45));
+  ctx.fillStyle = g;
+  roundRect(-s / 2 + pad, -s / 2 + pad, s - pad * 2, s - pad * 2, s * 0.22);
+  ctx.fill();
+  // highlight atas
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  roundRect(-s / 2 + pad + 2, -s / 2 + pad + 1.5, s - pad * 2 - 4, Math.max(2, s * 0.12), s * 0.06);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPiece(cells, ox, oy, cell, color, alpha, scale) {
+  for (const [r, c] of cells) drawBlock(ox + c * cell, oy + r * cell, cell, color, alpha, scale);
+}
+
+// ---------- render ----------
+let bgStars = [];
+function initStars() {
+  bgStars = [];
+  for (let i = 0; i < 70; i++) {
+    bgStars.push({ x: Math.random(), y: Math.random(), r: Math.random() * 1.8 + 0.4, tw: Math.random() * 6.28 });
+  }
+}
+initStars();
+
+function drawBackground(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0d1130');
+  g.addColorStop(0.6, '#141a3d');
+  g.addColorStop(1, '#1d2450');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff';
+  for (const s of bgStars) {
+    ctx.globalAlpha = 0.25 + 0.35 * Math.abs(Math.sin(t / 1400 + s.tw));
+    ctx.beginPath();
+    ctx.arc(s.x * W, s.y * H, s.r, 0, 6.29);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHeader() {
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '600 13px -apple-system, sans-serif';
+  ctx.fillText('S K O R', W / 2, 34);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 44px -apple-system, sans-serif';
+  ctx.fillText(String(score), W / 2, 74);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.font = '600 12px -apple-system, sans-serif';
+  ctx.fillText('TERBAIK', L.pad + 2, 34);
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = '800 22px -apple-system, sans-serif';
+  ctx.fillText(String(Math.max(best, score)), L.pad + 2, 58);
+  // tombol restart
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  roundRect(restartBtn.x, restartBtn.y, restartBtn.w, restartBtn.h, 12);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 15px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('⟳ Ulang', restartBtn.x + restartBtn.w / 2, restartBtn.y + 26);
+  ctx.textAlign = 'left';
+}
+
+function drawBoard(t) {
+  // panel papan
+  ctx.fillStyle = 'rgba(8,10,26,0.55)';
+  roundRect(L.boardX - 10, L.boardY - 10, L.boardSize + 20, L.boardSize + 20, 18);
+  ctx.fill();
+  // sel kosong
+  for (let r = 0; r < BOARD; r++) {
+    for (let c = 0; c < BOARD; c++) {
+      const p = boardXY(r, c);
+      ctx.fillStyle = 'rgba(255,255,255,0.055)';
+      roundRect(p.x + 2, p.y + 2, L.cell - 4, L.cell - 4, L.cell * 0.2);
+      ctx.fill();
+    }
+  }
+  // ghost saat drag
+  if (drag) {
+    const ok = drag.valid;
+    for (const [dr, dc] of drag.piece.cells) {
+      const rr = drag.anchorR + dr, cc = drag.anchorC + dc;
+      if (rr < 0 || rr >= BOARD || cc < 0 || cc >= BOARD) continue;
+      const p = boardXY(rr, cc);
+      ctx.fillStyle = ok ? 'rgba(123,237,108,0.45)' : 'rgba(255,91,91,0.35)';
+      roundRect(p.x + 2, p.y + 2, L.cell - 4, L.cell - 4, L.cell * 0.2);
+      ctx.fill();
+    }
+  }
+  // sel terisi
+  const clearingSet = {};
+  for (const cl of clearing) for (const [r, c] of cl.cells) clearingSet[r + ',' + c] = cl;
+  for (let r = 0; r < BOARD; r++) {
+    for (let c = 0; c < BOARD; c++) {
+      const cellData = board[r][c];
+      if (!cellData) continue;
+      const p = boardXY(r, c);
+      const cl = clearingSet[r + ',' + c];
+      if (cl) {
+        const k = Math.min(1, (t - cl.t0) / 260);
+        const flash = 0.5 + 0.5 * Math.sin(k * 25);
+        drawBlock(p.x, p.y, L.cell, '#ffffff', 1 - k * 0.4, 1 - k * 0.25);
+        ctx.globalAlpha = flash * (1 - k);
+        ctx.fillStyle = '#ffffff';
+        roundRect(p.x + 3, p.y + 3, L.cell - 6, L.cell - 6, L.cell * 0.18);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      } else {
+        drawBlock(p.x, p.y, L.cell, cellData.color, 1, 1);
+      }
+    }
+  }
+  // animasi pop saat balok diletakkan
+  placedPop = placedPop.filter(pp => t - pp.t0 < 180);
+  for (const pp of placedPop) {
+    const k = (t - pp.t0) / 180;
+    const s = 1 + 0.35 * Math.sin(k * Math.PI);
+    for (const [r, c, color] of pp.cells) {
+      if (board[r][c] && !clearingSet[r + ',' + c]) {
+        const p = boardXY(r, c);
+        ctx.save();
+        ctx.globalAlpha = 0.55 * (1 - k);
+        const cx = p.x + L.cell / 2, cy = p.y + L.cell / 2;
+        ctx.translate(cx, cy); ctx.scale(s, s); ctx.translate(-cx, -cy);
+        drawBlock(p.x, p.y, L.cell, '#ffffff', 1, 1);
+        ctx.restore();
+      }
+    }
+  }
+}
+
+function drawTray() {
+  for (let i = 0; i < 3; i++) {
+    const s = L.slots[i];
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    roundRect(s.x, s.y, s.w, s.h, 16);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1.5;
+    roundRect(s.x, s.y, s.w, s.h, 16);
+    ctx.stroke();
+    const piece = tray[i];
+    if (!piece) continue;
+    if (drag && drag.trayIndex === i) continue; // sedang di-drag, jangan gambar di baki
+    const mini = Math.min((s.w - 28) / piece.cols, (s.h - 28) / piece.rows, 30);
+    const ox = s.cx - (piece.cols * mini) / 2;
+    const oy = s.cy - (piece.rows * mini) / 2;
+    drawPiece(piece.cells, ox, oy, mini, piece.color, 1, 1);
+  }
+  // balok yang di-drag mengikuti jari
+  if (drag) {
+    const piece = drag.piece;
+    const ox = drag.x - (piece.cols * L.cell) / 2;
+    const oy = drag.y - (piece.rows * L.cell) / 2 - L.cell * 0.4;
+    drawPiece(piece.cells, ox, oy, L.cell, piece.color, 0.92, 1);
+  }
+}
+
+function drawParticles(dt) {
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 500 * dt;
+    p.life -= dt * 1.6;
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, 6.29);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFloaters(dt) {
+  floaters = floaters.filter(f => f.life > 0);
+  ctx.textAlign = 'center';
+  for (const f of floaters) {
+    f.life -= dt * 0.9;
+    f.y -= 46 * dt;
+    ctx.globalAlpha = Math.min(1, f.life * 1.6);
+    ctx.font = '800 ' + f.size + 'px -apple-system, sans-serif';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.strokeText(f.text, f.x, f.y);
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(5,7,20,0.78)';
+  ctx.fillRect(0, 0, W, H);
+  const bw = Math.min(W - 64, 320), bh = 300;
+  const bx = (W - bw) / 2, by = (H - bh) / 2;
+  ctx.fillStyle = '#1c2450';
+  roundRect(bx, by, bw, bh, 24);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 2;
+  roundRect(bx, by, bw, bh, 24);
+  ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff5b5b';
+  ctx.font = '800 30px -apple-system, sans-serif';
+  ctx.fillText('Game Over', W / 2, by + 58);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '600 14px -apple-system, sans-serif';
+  ctx.fillText('SKOR', W / 2, by + 104);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 52px -apple-system, sans-serif';
+  ctx.fillText(String(score), W / 2, by + 158);
+  const isBest = score > best && score > 0;
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = '700 16px -apple-system, sans-serif';
+  ctx.fillText(isBest ? '★ Skor Terbaik Baru! ★' : 'Terbaik: ' + Math.max(best, score), W / 2, by + 192);
+  againBtn = { x: bx + 40, y: by + 216, w: bw - 80, h: 56 };
+  const g = ctx.createLinearGradient(0, againBtn.y, 0, againBtn.y + againBtn.h);
+  g.addColorStop(0, '#7bed6c'); g.addColorStop(1, '#3ecf4f');
+  ctx.fillStyle = g;
+  roundRect(againBtn.x, againBtn.y, againBtn.w, againBtn.h, 16);
+  ctx.fill();
+  ctx.fillStyle = '#0d3313';
+  ctx.font = '800 19px -apple-system, sans-serif';
+  ctx.fillText('▶ Main Lagi', W / 2, againBtn.y + 36);
+  ctx.textAlign = 'left';
+}
+
+// ---------- input (Pointer Events: mouse + sentuh) ----------
+function ptrPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+function inRect(x, y, rc) {
+  return x >= rc.x && x <= rc.x + rc.w && y >= rc.y && y <= rc.y + rc.h;
+}
+
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  ensureAudio();
+  const { x, y } = ptrPos(e);
+  if (gameOver) {
+    if (againBtn && inRect(x, y, againBtn)) {
+      sfx.click();
+      if (score > best) { best = score; try { localStorage.setItem('blockRakaBest', String(best)); } catch(err) {} }
+      resetGame();
+    }
+    return;
+  }
+  if (restartBtn && inRect(x, y, restartBtn)) { sfx.click(); resetGame(); return; }
+  for (let i = 0; i < 3; i++) {
+    const s = L.slots[i];
+    const piece = tray[i];
+    if (!piece) continue;
+    if (inRect(x, y, s)) {
+      drag = { piece, trayIndex: i, x, y, valid: false, anchorR: -99, anchorC: -99 };
+      canvas.setPointerCapture(e.pointerId);
+      updateDrag(x, y);
+      break;
+    }
+  }
+});
+
+function updateDrag(x, y) {
+  if (!drag) return;
+  drag.x = x; drag.y = y;
+  const piece = drag.piece;
+  // jangkar: sel kiri-atas balok dipetakan ke papan dari posisi jari
+  const ox = x - (piece.cols * L.cell) / 2;
+  const oy = y - (piece.rows * L.cell) / 2 - L.cell * 0.4;
+  const anchorC = Math.round((ox - L.boardX) / L.cell);
+  const anchorR = Math.round((oy - L.boardY) / L.cell);
+  drag.anchorR = anchorR; drag.anchorC = anchorC;
+  drag.valid = canPlace(piece, anchorR, anchorC);
+}
+
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  e.preventDefault();
+  const { x, y } = ptrPos(e);
+  updateDrag(x, y);
+});
+
+function endDrag(e) {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  if (d.valid && canPlace(d.piece, d.anchorR, d.anchorC)) {
+    tray[d.trayIndex] = null;
+    placePiece(d.piece, d.anchorR, d.anchorC);
+    if (tray.every(p => !p)) refillTray();
+    if (checkGameOver()) {
+      gameOver = true;
+      sfx.over();
+      if (score > best) { best = score; try { localStorage.setItem('blockRakaBest', String(best)); } catch(err) {} }
+    }
+  } else {
+    if (d.valid === false) sfx.bad();
+  }
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', () => { drag = null; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault());
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+// ---------- main loop ----------
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  // selesaikan animasi clear yang kedaluwarsa
+  const t = now;
+  clearing = clearing.filter(cl => {
+    if (t - cl.t0 >= 260) {
+      for (const [r, c] of cl.cells) board[r][c] = null;
+      return false;
+    }
+    return true;
+  });
+  drawBackground(t);
+  drawHeader();
+  drawBoard(t);
+  drawTray();
+  drawParticles(dt);
+  drawFloaters(dt);
+  if (gameOver) drawGameOver();
+  requestAnimationFrame(frame);
+}
+
+resetGame();
+resize();
+requestAnimationFrame(frame);
+
+
+</script>
+</body>
+</html>
